@@ -62,9 +62,19 @@ class AgentBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
         self.rate_window: dict[tuple[int, int], list[float]] = {}
         self.session_locks: dict[tuple[int, int], asyncio.Lock] = {}
+        self.guild_commands_synced = False
 
     async def setup_hook(self) -> None:
+        # Keep global registration as the production/default command set.
         await self.tree.sync()
+
+    async def sync_guild_commands(self) -> None:
+        # Guild commands propagate immediately, which is useful for local testing.
+        # We copy the globally defined commands into every guild this bot is in.
+        for guild in self.guilds:
+            self.tree.copy_global_to(guild=guild)
+            await self.tree.sync(guild=guild)
+        self.guild_commands_synced = True
 
     def lock_for(self, guild_id: int, user_id: int) -> asyncio.Lock:
         key = (guild_id, user_id)
@@ -86,7 +96,9 @@ bot = AgentBot()
 
 @bot.event
 async def on_ready():
-    print(f"Koya AI Player online as {bot.user} | executor={executor.mode}")
+    if not bot.guild_commands_synced:
+        await bot.sync_guild_commands()
+    print(f"Koya AI Player online as {bot.user} | executor={executor.mode} | guild_commands_synced={bot.guild_commands_synced}")
 
 
 @bot.tree.command(name="navigator", description="Control the adaptive Koya AI player.")
