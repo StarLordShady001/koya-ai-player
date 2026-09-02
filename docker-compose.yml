@@ -1,0 +1,7 @@
+services:
+  koya-ai-player:
+    build: .
+    env_file: .env
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
