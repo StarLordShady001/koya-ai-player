@@ -1,0 +1,1 @@
+export default { async fetch(request, env) { const url = new URL(request.url); if (request.method === 'GET' && url.pathname === '/health') return new Response(JSON.stringify({ ok: true, service: 'koya-ai-player' }), { headers: { 'content-type': 'application/json' } }); return new Response('Koya AI Player worker', { status: 200 }); } };
