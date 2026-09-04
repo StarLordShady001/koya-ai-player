@@ -5,6 +5,9 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
+from dotenv import load_dotenv
+
+load_dotenv()
 
 CLOUDFLARE_AI_URL = os.getenv('CLOUDFLARE_AI_URL', '').rstrip('/')
 CLOUDFLARE_AI_TOKEN = os.getenv('CLOUDFLARE_AI_TOKEN', '')
