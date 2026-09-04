@@ -6,10 +6,12 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from openai import OpenAI
+import httpx
 
-MODEL = os.getenv("OPENAI_MODEL", "gpt-5.6")
+CLOUDFLARE_AI_URL = os.getenv("CLOUDFLARE_AI_URL", "").rstrip("/")
+CLOUDFLARE_AI_TOKEN = os.getenv("CLOUDFLARE_AI_TOKEN", "")
 MAX_HISTORY = int(os.getenv("MAX_AI_HISTORY", "12"))
+AI_TIMEOUT = float(os.getenv("AI_TIMEOUT", "30"))
 
 COMMAND_CATALOG = [
     "/adventure context", "/adventure guide", "/adventure tutorial", "/balance",
@@ -30,39 +32,31 @@ COMMAND_CATALOG = [
     "/train list", "/vote check", "/vote rewards", "/wanted",
 ]
 
-BLOCKED_AUTOMATION_PREFIXES = (
-    "/adventure delete", "/premium", "/dice bet", "/casino bet", "/fleet transfer",
-)
+BLOCKED_AUTOMATION_PREFIXES = ("/adventure delete", "/premium", "/dice bet", "/casino bet", "/fleet transfer")
 
 SYSTEM_PROMPT = """
-You are the strategy engine for an AI agent playing Koya's One Piece World Tour
-Adventure game. Your job is to understand the player's current state, chapter
-story/goals, resources, cooldowns and recent outcomes, then choose the next
-single best action.
+You are the strategy engine for an AI agent playing Koya's One Piece World Tour Adventure game.
 
-Important behavior:
-- Optimize for chapter/story progression first, then character power, then sustainable resources and passive income.
-- Prefer actions that satisfy multiple active goals at once.
-- Never invent a command. Select only from the supplied command catalog.
-- Never choose premium spending, deleting a profile, gambling, transfers, or other risky actions unless an authorized executor policy explicitly permits it.
-- Treat ambiguous Koya output as uncertain. When uncertain, inspect state with a view/stats/context command instead of guessing.
-- Learn from outcomes. If an action produced no progress, an error, a cooldown, or unexpected resource cost, update the strategy and avoid blindly repeating it.
-- Keep actions granular: return one next action, not a long batch.
-- You may recommend waiting when the current state is blocked by cooldown, missing energy, or an active expedition; represent that with action=null.
+Inspect the supplied game state and recent observations, then choose exactly ONE best next action.
 
-Return ONLY valid JSON matching this schema:
-{
-  "action": string|null,
-  "arguments": object,
-  "reason": string,
-  "goal": string,
-  "confidence": number,
-  "risk": "low"|"medium"|"high",
-  "expected_result": string,
-  "state_updates": object
-}
+Priority:
+1. Complete active chapter/story objectives.
+2. Improve character power efficiently.
+3. Maintain sustainable berries, cola, energy and other resources.
+4. Keep passive/income activities productive.
+5. Avoid unnecessary risk.
+
+Rules:
+- Never invent commands.
+- Only select commands from the supplied command catalog.
+- Prefer actions that advance multiple active goals.
+- If information is incomplete or ambiguous, choose an inspection command.
+- Learn from recent outcomes. Avoid blindly repeating failed actions, cooldowns, or actions that produced no progress.
+- Never select premium spending, gambling, deletion, transfers, or other high-risk actions.
+- Return exactly one action or null if waiting/inspection is preferable.
+
+Return ONLY valid JSON matching the required decision fields.
 """
-
 
 @dataclass
 class Decision:
@@ -75,7 +69,6 @@ class Decision:
     expected_result: str
     state_updates: dict[str, Any]
 
-
 def _strip_json(text: str) -> str:
     text = text.strip()
     if text.startswith("```"):
@@ -83,45 +76,53 @@ def _strip_json(text: str) -> str:
         text = re.sub(r"\s*```$", "", text)
     return text.strip()
 
-
 class AIBrain:
     def __init__(self) -> None:
-        self.client = OpenAI()
+        if not CLOUDFLARE_AI_URL:
+            raise RuntimeError("Missing CLOUDFLARE_AI_URL")
+        if not CLOUDFLARE_AI_TOKEN:
+            raise RuntimeError("Missing CLOUDFLARE_AI_TOKEN")
 
     def decide(self, game_state: dict[str, Any], recent_events: list[dict[str, Any]]) -> Decision:
         payload = {
             "game_state": game_state,
             "recent_events": recent_events[-MAX_HISTORY:],
             "available_commands": COMMAND_CATALOG,
-            "automation_policy": {
-                "blocked_prefixes": BLOCKED_AUTOMATION_PREFIXES,
-                "executor_default": "advisory_only",
-            },
+            "automation_policy": {"blocked_prefixes": list(BLOCKED_AUTOMATION_PREFIXES), "executor_default": "advisory_only"},
         }
-        response = self.client.responses.create(
-            model=MODEL,
-            instructions=SYSTEM_PROMPT,
-            input=json.dumps(payload, ensure_ascii=False),
-            store=False,
-        )
-        raw = _strip_json(response.output_text)
-        data = json.loads(raw)
-        action = data.get("action")
-        if action:
-            normalized = action.strip()
-            if not any(normalized == cmd or normalized.startswith(cmd.split(" <")[0]) for cmd in COMMAND_CATALOG):
+        headers = {
+            "Authorization": f"Bearer {CLOUDFLARE_AI_TOKEN}",
+            "Content-Type": "application/json",
+        }
+        with httpx.Client(timeout=AI_TIMEOUT) as client:
+            response = client.post(CLOUDFLARE_AI_URL, headers=headers, json=payload)
+            response.raise_for_status()
+            result = response.json()
+        if not result.get('ok'):
+            raise RuntimeError(result.get("error", "Cloudflare AI request failed"))
+        choices = result.get('choices') or []
+        content = None
+        if choices:
+            content = (choices[0].get('message') or {}).get('content')
+        if not isinstance(content, str) or not content.strip():
+            raise RuntimeError("Cloudflare AI returned no decision content")
+        data = json.loads(_strip_json(content))
+        action = data.get('action')
+        if action is not None:
+            action = str(action).strip()
+            allowed = any(action == cmd or action.startswith(cmd.split(' <')[0] + ' ') for cmd in COMMAND_CATALOG)
+            if not allowed:
                 raise ValueError(f"AI selected unsupported command: {action}")
             for blocked in BLOCKED_AUTOMATION_PREFIXES:
-                if normalized.startswith(blocked):
+                if action.startswith(blocked):
                     raise ValueError(f"AI selected blocked action: {action}")
-            action = normalized
         return Decision(
             action=action,
-            arguments=data.get("arguments") or {},
-            reason=str(data.get("reason", "")),
-            goal=str(data.get("goal", "")),
-            confidence=max(0.0, min(1.0, float(data.get("confidence", 0.0)))),
-            risk=str(data.get("risk", "medium")),
-            expected_result=str(data.get("expected_result", "")),
-            state_updates=data.get("state_updates") or {},
+            arguments=data.get('arguments') or {},
+            reason=str(data.get('reason', '')),
+            goal=str(data.get('goal', '')),
+            confidence=max(0.0, min(1.0, float(data.get('confidence', 0.0)))),
+            risk=str(data.get('risk', 'medium')),
+            expected_result=str(data.get('expected_result', '')),
+            state_updates=data.get('state_updates') or {},
         )
