@@ -47,7 +47,11 @@ def _parse_objectives(text: str) -> list[dict[str, Any]]:
     # Buy 1 combat items from the shop: 0/1 (0%)
     for raw_line in text.splitlines():
         line = raw_line.strip().lstrip('•-*').strip()
-        if not re.search(r'(?i)\d+\s*/\s*\d+', line):
+        if re.match(r'(?i)^chapter\s+\d+\s*/\s*\d+', line):
+            continue
+        if not re.search(r'\b\d+\s*/\s*\d+\b', line):
+            continue
+        if not re.search(r'\(\s*\d{1,3}\s*%\s*\)', line):
             continue
 
         progress = re.search(r'(\d[\d,]*)\s*/\s*(\d[\d,]*)', line)
