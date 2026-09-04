@@ -6,17 +6,66 @@ from typing import Any
 
 def extract_message_text(message) -> str:
     parts: list[str] = []
-    if getattr(message, 'content', None):
-        parts.append(message.content)
-    for embed in getattr(message, 'embeds', []) or []:
-        for attr in ('title', 'description', 'footer'):
-            value = getattr(embed, attr, None)
-            if value:
-                if attr == 'footer' and hasattr(value, 'text'):
-                    value = value.text
-                parts.append(str(value))
+
+    content = getattr(message, 'content', None)
+    if content:
+        parts.append(str(content))
+
+    embeds = getattr(message, 'embeds', []) or []
+    for embed in embeds:
+        title = getattr(embed, 'title', None)
+        if title:
+            parts.append(str(title))
+
+        description = getattr(embed, 'description', None)
+        if description:
+            parts.append(str(description))
+
+        footer = getattr(embed, 'footer', None)
+        footer_text = getattr(footer, 'text', None) if footer else None
+        if footer_text:
+            parts.append(str(footer_text))
+
+        author = getattr(embed, 'author', None)
+        author_name = getattr(author, 'name', None) if author else None
+        if author_name:
+            parts.append(str(author_name))
+
         for field in getattr(embed, 'fields', []) or []:
-            parts.append(f'{field.name}: {field.value}')
+            name = getattr(field, 'name', None)
+            value = getattr(field, 'value', None)
+            if name:
+                parts.append(str(name))
+            if value:
+                parts.append(str(value))
+
+    # Last-resort fallback for Discord payloads where embed attributes
+    # are not exposed through the high-level object as expected.
+    if not parts and hasattr(message, 'to_dict'):
+        try:
+            raw = message.to_dict()
+            raw_content = raw.get('content')
+            if raw_content:
+                parts.append(str(raw_content))
+            for embed in raw.get('embeds', []) or []:
+                for key in ('title', 'description'):
+                    value = embed.get(key)
+                    if value:
+                        parts.append(str(value))
+                footer = embed.get('footer') or {}
+                if footer.get('text'):
+                    parts.append(str(footer['text']))
+                author = embed.get('author') or {}
+                if author.get('name'):
+                    parts.append(str(author['name']))
+                for field in embed.get('fields', []) or []:
+                    if field.get('name'):
+                        parts.append(str(field['name']))
+                    if field.get('value'):
+                        parts.append(str(field['value']))
+        except Exception:
+            pass
+
     return '\n'.join(p for p in parts if p).strip()
 
 
