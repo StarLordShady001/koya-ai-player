@@ -213,8 +213,12 @@ async def analyze_for_user(message: discord.Message, user_id: int) -> None:
 
 @bot.event
 async def on_message(message: discord.Message):
-    if message.author == bot.user or not message.guild or not is_koya(message):
+    if message.author == bot.user or not message.guild:
         return
+    print(f'[observer] message author={message.author} id={message.author.id} bot={message.author.bot} name={message.author.name!r}')
+    if not is_koya(message):
+        return
+    print(f'[observer] Koya message detected in #{message.channel.name} guild={message.guild.id}')
     con = __import__("sqlite3").connect(os.getenv("DB_PATH", "koya_ai_player.db"))
     rows = con.execute("SELECT user_id FROM agent_sessions WHERE guild_id=? AND enabled=1", (message.guild.id,)).fetchall()
     con.close()
