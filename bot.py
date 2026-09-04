@@ -286,6 +286,7 @@ async def on_message(message: discord.Message):
     con = __import__("sqlite3").connect(os.getenv("DB_PATH", "koya_ai_player.db"))
     rows = con.execute("SELECT user_id FROM agent_sessions WHERE guild_id=? AND enabled=1", (message.guild.id,)).fetchall()
     con.close()
+    print(f"[observer] enabled sessions for guild={message.guild.id}: {rows}")
     for (user_id,) in rows:
         await analyze_for_user(message, user_id)
 
