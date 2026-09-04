@@ -161,55 +161,119 @@ async def state_cmd(interaction: discord.Interaction):
 
 async def analyze_for_user(message: discord.Message, user_id: int) -> None:
     gid = message.guild.id
+    print(f"[observer] analyzing guild={gid} user={user_id}")
+
     key_lock = bot.lock_for(gid, user_id)
     async with key_lock:
         session = get_session(gid, user_id)
-        if not session["enabled"]:
+        print(f"[observer] session enabled={session['enabled']} mode={session['mode']}")
+
+        if not session['enabled']:
+            print("[observer] session disabled; ignoring Koya update")
             return
+
         text = extract_message_text(message)
+        print(f"[observer] extracted_text_length={len(text)}")
+
         if not text:
+            print("[observer] Koya message contained no readable text")
             return
+
         save_event(gid, user_id, "koya", text)
         observation = parse_observation(text)
+        print(
+            f"[observer] parsed chapter={observation.get('chapter_name')!r} "
+            f"progress={observation.get('progress_percent')!r} "
+            f"objectives={observation.get('objectives')!r}"
+        )
+
         previous_state = read_state(gid, user_id)
-        write_state(gid, user_id, normalize_state(previous_state, observation, None))
+        merged_state = normalize_state(previous_state, observation, None)
+        write_state(gid, user_id, merged_state)
+
         if not bot.allowed_by_rate(gid, user_id):
+            print("[observer] rate limit skipped analysis")
             return
+
+        print("[observer] sending state to Cloudflare AI")
+
         try:
-            decision = await asyncio.to_thread(brain.decide, read_state(gid, user_id), recent_events(gid, user_id))
+            decision = await asyncio.to_thread(
+                brain.decide,
+                merged_state,
+                recent_events(gid, user_id),
+            )
         except Exception as exc:
-            update_session(gid, user_id, last_decision_json=json.dumps({"error": str(exc), "ts": time.time()}))
-            await message.channel.send(f"🧭 **AI Player:** analysis failed safely: `{type(exc).__name__}`. No action was executed.")
+            error_data = {
+                "error": str(exc),
+                "type": type(exc).__name__,
+                "ts": time.time(),
+            }
+            print(f"[observer] Cloudflare/AI error: {error_data}")
+            update_session(gid, user_id, last_decision_json=json.dumps(error_data))
+            await message.channel.send(
+                f"🧭 **AI Player:** analysis failed safely: `{type(exc).__name__}`. No action was executed."
+            )
             return
-        state = normalize_state(previous_state, observation, decision)
+
+        print(
+            f"[observer] AI decision action={decision.action!r} "
+            f"confidence={decision.confidence:.2f} risk={decision.risk!r}"
+        )
+
+        state = normalize_state(merged_state, observation, decision)
         write_state(gid, user_id, state)
-        update_session(gid, user_id, last_decision_json=json.dumps({
-            "action": decision.action,
-            "arguments": decision.arguments,
-            "reason": decision.reason,
-            "goal": decision.goal,
-            "confidence": decision.confidence,
-            "risk": decision.risk,
-            "expected_result": decision.expected_result,
-        }, ensure_ascii=False))
+        update_session(
+            gid,
+            user_id,
+            last_decision_json=json.dumps(
+                {
+                    "action": decision.action,
+                    "arguments": decision.arguments,
+                    "reason": decision.reason,
+                    "goal": decision.goal,
+                    "confidence": decision.confidence,
+                    "risk": decision.risk,
+                    "expected_result": decision.expected_result,
+                    "state_updates": decision.state_updates,
+                },
+                ensure_ascii=False,
+            ),
+        )
 
         if not decision.action:
             msg = f"🧭 **AI Player:** wait / inspect. {decision.reason}"
         else:
             command = decision.action
             if decision.arguments:
-                args = " ".join(f"{k}={v}" for k, v in decision.arguments.items())
+                args = " ".join(f"{key}={value}" for key, value in decision.arguments.items())
                 command = f"{command} {args}"
             if decision.confidence < MIN_CONFIDENCE or decision.risk == "high":
-                msg = f"🧭 **AI Player → HOLD**\nProposed: `{command}`\nReason: {decision.reason}\nConfidence: {decision.confidence:.2f}"
+                msg = (
+                    f"🧭 **AI Player → HOLD**\n"
+                    f"Proposed: `{command}`\n"
+                    f"Reason: {decision.reason}\n"
+                    f"Confidence: {decision.confidence:.2f}"
+                )
             else:
                 result = await executor.execute(decision.action, decision.arguments)
                 if result.get("status") == "advisory":
-                    msg = f"🧭 **AI Player → {command}**\n{decision.reason}\nConfidence: {decision.confidence:.2f}\n_Advisory: no Discord user-account command was sent._"
+                    msg = (
+                        f"🧭 **AI Player → {command}**\n"
+                        f"{decision.reason}\n"
+                        f"Confidence: {decision.confidence:.2f}\n"
+                        "_Advisory: no Discord user-account command was sent._"
+                    )
                 else:
-                    msg = f"🧭 **AI Player → EXECUTED VIA AUTHORIZED ADAPTER**\n`{command}`\n{decision.reason}\nResult: `{result.get('status','ok')}`"
-        await message.channel.send(msg[:1900])
+                    msg = (
+                        "🧭 **AI Player → EXECUTED VIA AUTHORIZED ADAPTER**\n"
+                        f"`{command}`\n"
+                        f"{decision.reason}\n"
+                        f"Result: `{result.get('status', 'ok')}`"
+                    )
 
+        print("[observer] sending AI result to Discord")
+        await message.channel.send(msg[:1900])
 
 @bot.event
 async def on_message(message: discord.Message):
